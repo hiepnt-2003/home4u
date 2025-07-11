@@ -1,0 +1,826 @@
+# Kế hoạch Phần mềm Booking Phòng Trọ - Microservice Architecture
+
+## 1. Tổng quan hệ thống
+
+### Kiến trúc Microservice
+```
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│   API Gateway   │    │  Service Mesh   │    │   Load Balancer │
+│   (Spring Boot) │    │    (Consul)     │    │     (Nginx)     │
+└─────────────────┘    └─────────────────┘    └─────────────────┘
+         │                       │                       │
+         └───────────────────────┼───────────────────────┘
+                                 │
+    ┌────────────────────────────┼────────────────────────────┐
+    │                            │                            │
+┌───▼───┐  ┌────────┐  ┌─────────▼───┐  ┌─────────┐  ┌──────────┐
+│ User  │  │ Room   │  │ Booking     │  │ Payment │  │ Notification │
+│Service│  │Service │  │ Service     │  │ Service │  │ Service      │
+└───────┘  └────────┘  └─────────────┘  └─────────┘  └──────────────┘
+    │          │              │              │              │
+┌───▼───┐  ┌───▼───┐  ┌───────▼──────┐  ┌────▼────┐  ┌──────▼──────┐
+│MySQL  │  │MySQL  │  │    MySQL     │  │ MySQL   │  │   MySQL     │
+│User DB│  │Room DB│  │  Booking DB  │  │ Pay DB  │  │ Notify DB   │
+└───────┘  └───────┘  └──────────────┘  └─────────┘  └─────────────┘
+```
+
+## 2. Danh sách các Services
+
+### 2.1 API Gateway Service (Port: 8080)
+- **Chức năng**: Điều hướng request, xác thực JWT, rate limiting
+- **Database**: Không cần
+- **Dependencies**: Spring Cloud Gateway, Spring Security
+
+### 2.2 User Service (Port: 8081)
+- **Chức năng**: Quản lý người dùng (chủ trọ, người thuê, admin)
+- **Database**: user_service_db
+- **Entities**: User, Role, UserProfile
+
+### 2.3 Room Service (Port: 8082)
+- **Chức năng**: Quản lý phòng trọ, upload ảnh, duyệt phòng
+- **Database**: room_service_db
+- **Entities**: Room, RoomImage, RoomDocument, RoomStatus
+
+### 2.4 Booking Service (Port: 8083)
+- **Chức năng**: Quản lý đặt phòng, lịch sử booking
+- **Database**: booking_service_db
+- **Entities**: Booking, BookingStatus, BookingHistory
+
+### 2.5 Payment Service (Port: 8084)
+- **Chức năng**: Xử lý thanh toán, xác nhận giao dịch
+- **Database**: payment_service_db
+- **Entities**: Payment, PaymentMethod, Transaction
+
+### 2.6 Notification Service (Port: 8085)
+- **Chức năng**: Gửi thông báo email, SMS, push notification
+- **Database**: notification_service_db
+- **Entities**: Notification, NotificationTemplate, NotificationLog
+
+## 3. Chi tiết từng Service
+
+### 3.1 API Gateway Service
+
+#### Structure:
+```
+api-gateway/
+├── src/main/java/com/roombook/gateway/
+│   ├── GatewayApplication.java
+│   ├── config/
+│   │   ├── GatewayConfig.java
+│   │   └── SecurityConfig.java
+│   ├── filter/
+│   │   ├── AuthenticationFilter.java
+│   │   └── LoggingFilter.java
+│   └── controller/
+│       └── GatewayController.java
+├── src/main/resources/
+│   └── application.properties
+└── build.gradle
+```
+
+#### build.gradle:
+```gradle
+dependencies {
+    implementation 'org.springframework.boot:spring-boot-starter-webflux'
+    implementation 'org.springframework.cloud:spring-cloud-starter-gateway'
+    implementation 'org.springframework.boot:spring-boot-starter-security'
+    implementation 'io.jsonwebtoken:jjwt-api:0.11.5'
+    implementation 'io.jsonwebtoken:jjwt-impl:0.11.5'
+    implementation 'io.jsonwebtoken:jjwt-jackson:0.11.5'
+}
+```
+
+#### application.properties:
+```properties
+server.port=8080
+spring.application.name=api-gateway
+
+# Gateway Routes
+spring.cloud.gateway.routes[0].id=user-service
+spring.cloud.gateway.routes[0].uri=http://localhost:8081
+spring.cloud.gateway.routes[0].predicates[0]=Path=/api/users/**
+
+spring.cloud.gateway.routes[1].id=room-service
+spring.cloud.gateway.routes[1].uri=http://localhost:8082
+spring.cloud.gateway.routes[1].predicates[0]=Path=/api/rooms/**
+
+spring.cloud.gateway.routes[2].id=booking-service
+spring.cloud.gateway.routes[2].uri=http://localhost:8083
+spring.cloud.gateway.routes[2].predicates[0]=Path=/api/bookings/**
+
+spring.cloud.gateway.routes[3].id=payment-service
+spring.cloud.gateway.routes[3].uri=http://localhost:8084
+spring.cloud.gateway.routes[3].predicates[0]=Path=/api/payments/**
+
+spring.cloud.gateway.routes[4].id=notification-service
+spring.cloud.gateway.routes[4].uri=http://localhost:8085
+spring.cloud.gateway.routes[4].predicates[0]=Path=/api/notifications/**
+
+# JWT Configuration
+jwt.secret=mySecretKey
+jwt.expiration=86400000
+```
+
+### 3.2 User Service
+
+#### Structure:
+```
+user-service/
+├── src/main/java/com/roombook/user/
+│   ├── UserServiceApplication.java
+│   ├── controller/
+│   │   ├── UserController.java
+│   │   └── AuthController.java
+│   ├── service/
+│   │   ├── UserService.java
+│   │   ├── UserServiceImpl.java
+│   │   ├── AuthService.java
+│   │   └── AuthServiceImpl.java
+│   ├── repository/
+│   │   ├── UserRepository.java
+│   │   └── RoleRepository.java
+│   ├── entity/
+│   │   ├── User.java
+│   │   ├── Role.java
+│   │   └── UserProfile.java
+│   ├── dto/
+│   │   ├── UserDTO.java
+│   │   ├── LoginRequestDTO.java
+│   │   └── RegisterRequestDTO.java
+│   └── config/
+│       ├── DatabaseConfig.java
+│       └── SecurityConfig.java
+├── src/main/resources/
+│   └── application.properties
+└── build.gradle
+```
+
+#### build.gradle:
+```gradle
+dependencies {
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+    implementation 'org.springframework.boot:spring-boot-starter-security'
+    implementation 'org.springframework.boot:spring-boot-starter-validation'
+    implementation 'mysql:mysql-connector-java:8.0.33'
+    implementation 'io.jsonwebtoken:jjwt-api:0.11.5'
+    implementation 'io.jsonwebtoken:jjwt-impl:0.11.5'
+    implementation 'io.jsonwebtoken:jjwt-jackson:0.11.5'
+    implementation 'org.springframework.boot:spring-boot-starter-mail'
+}
+```
+
+#### application.properties:
+```properties
+server.port=8081
+spring.application.name=user-service
+
+# Database Configuration
+spring.datasource.url=jdbc:mysql://localhost:3306/user_service_db
+spring.datasource.username=root
+spring.datasource.password=password
+spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver
+
+# JPA Configuration
+spring.jpa.hibernate.ddl-auto=update
+spring.jpa.show-sql=true
+spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.MySQL8Dialect
+
+# JWT Configuration
+jwt.secret=mySecretKey
+jwt.expiration=86400000
+
+# Mail Configuration
+spring.mail.host=smtp.gmail.com
+spring.mail.port=587
+spring.mail.username=your-email@gmail.com
+spring.mail.password=your-app-password
+spring.mail.properties.mail.smtp.auth=true
+spring.mail.properties.mail.smtp.starttls.enable=true
+```
+
+#### Entity Classes:
+```java
+// User.java
+@Entity
+@Table(name = "users")
+public class User {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+    
+    @Column(unique = true, nullable = false)
+    private String email;
+    
+    @Column(nullable = false)
+    private String password;
+    
+    @Column(nullable = false)
+    private String fullName;
+    
+    @Column(unique = true)
+    private String phone;
+    
+    @Enumerated(EnumType.STRING)
+    private UserRole role; // ADMIN, LANDLORD, TENANT
+    
+    @Enumerated(EnumType.STRING)
+    private UserStatus status; // ACTIVE, INACTIVE, PENDING
+    
+    @CreationTimestamp
+    private LocalDateTime createdAt;
+    
+    @UpdateTimestamp
+    private LocalDateTime updatedAt;
+    
+    // Getters and Setters
+}
+
+// Role.java
+@Entity
+@Table(name = "roles")
+public class Role {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+    
+    @Column(unique = true, nullable = false)
+    private String name;
+    
+    private String description;
+    
+    // Getters and Setters
+}
+
+// UserProfile.java
+@Entity
+@Table(name = "user_profiles")
+public class UserProfile {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+    
+    @OneToOne
+    @JoinColumn(name = "user_id")
+    private User user;
+    
+    private String avatar;
+    private String address;
+    private String identityCard;
+    private String identityCardImage;
+    private Date dateOfBirth;
+    private String bankAccount;
+    private String bankName;
+    
+    // Getters and Setters
+}
+```
+
+### 3.3 Room Service
+
+#### Structure:
+```
+room-service/
+├── src/main/java/com/roombook/room/
+│   ├── RoomServiceApplication.java
+│   ├── controller/
+│   │   ├── RoomController.java
+│   │   └── RoomImageController.java
+│   ├── service/
+│   │   ├── RoomService.java
+│   │   ├── RoomServiceImpl.java
+│   │   ├── FileUploadService.java
+│   │   └── FileUploadServiceImpl.java
+│   ├── repository/
+│   │   ├── RoomRepository.java
+│   │   ├── RoomImageRepository.java
+│   │   └── RoomDocumentRepository.java
+│   ├── entity/
+│   │   ├── Room.java
+│   │   ├── RoomImage.java
+│   │   └── RoomDocument.java
+│   ├── dto/
+│   │   ├── RoomDTO.java
+│   │   ├── RoomCreateRequestDTO.java
+│   │   └── RoomSearchRequestDTO.java
+│   └── config/
+│       ├── DatabaseConfig.java
+│       └── FileUploadConfig.java
+├── src/main/resources/
+│   └── application.properties
+└── build.gradle
+```
+
+#### build.gradle:
+```gradle
+dependencies {
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+    implementation 'org.springframework.boot:spring-boot-starter-validation'
+    implementation 'mysql:mysql-connector-java:8.0.33'
+    implementation 'org.springframework.boot:spring-boot-starter-web-services'
+    implementation 'commons-io:commons-io:2.11.0'
+    implementation 'org.apache.commons:commons-lang3:3.12.0'
+}
+```
+
+#### application.properties:
+```properties
+server.port=8082
+spring.application.name=room-service
+
+# Database Configuration
+spring.datasource.url=jdbc:mysql://localhost:3306/room_service_db
+spring.datasource.username=root
+spring.datasource.password=password
+spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver
+
+# JPA Configuration
+spring.jpa.hibernate.ddl-auto=update
+spring.jpa.show-sql=true
+spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.MySQL8Dialect
+
+# File Upload Configuration
+spring.servlet.multipart.max-file-size=10MB
+spring.servlet.multipart.max-request-size=50MB
+file.upload.dir=./uploads/
+
+# External Service URLs
+user.service.url=http://localhost:8081
+notification.service.url=http://localhost:8085
+```
+
+#### Entity Classes:
+```java
+// Room.java
+@Entity
+@Table(name = "rooms")
+public class Room {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+    
+    @Column(nullable = false)
+    private String title;
+    
+    @Column(length = 2000)
+    private String description;
+    
+    @Column(nullable = false)
+    private String address;
+    
+    @Column(nullable = false)
+    private String district;
+    
+    @Column(nullable = false)
+    private String city;
+    
+    @Column(nullable = false)
+    private Double price;
+    
+    @Column(nullable = false)
+    private Double area; // m2
+    
+    @Column(nullable = false)
+    private Integer capacity; // số người tối đa
+    
+    @Column(nullable = false)
+    private Long landlordId;
+    
+    @Enumerated(EnumType.STRING)
+    private RoomStatus status; // PENDING, APPROVED, REJECTED, AVAILABLE, OCCUPIED
+    
+    @Enumerated(EnumType.STRING)
+    private RoomType type; // SINGLE, SHARED, APARTMENT
+    
+    // Utilities
+    private Boolean hasWifi;
+    private Boolean hasAirConditioner;
+    private Boolean hasWaterHeater;
+    private Boolean hasRefrigerator;
+    private Boolean hasWashingMachine;
+    private Boolean hasParking;
+    private Boolean hasElevator;
+    private Boolean hasSecurity;
+    
+    @CreationTimestamp
+    private LocalDateTime createdAt;
+    
+    @UpdateTimestamp
+    private LocalDateTime updatedAt;
+    
+    // Getters and Setters
+}
+
+// RoomImage.java
+@Entity
+@Table(name = "room_images")
+public class RoomImage {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+    
+    @ManyToOne
+    @JoinColumn(name = "room_id")
+    private Room room;
+    
+    @Column(nullable = false)
+    private String imageUrl;
+    
+    @Column(nullable = false)
+    private String fileName;
+    
+    @Column(nullable = false)
+    private Boolean isPrimary; // ảnh chính
+    
+    @CreationTimestamp
+    private LocalDateTime createdAt;
+    
+    // Getters and Setters
+}
+
+// RoomDocument.java
+@Entity
+@Table(name = "room_documents")
+public class RoomDocument {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+    
+    @ManyToOne
+    @JoinColumn(name = "room_id")
+    private Room room;
+    
+    @Column(nullable = false)
+    private String documentUrl;
+    
+    @Column(nullable = false)
+    private String fileName;
+    
+    @Enumerated(EnumType.STRING)
+    private DocumentType type; // OWNERSHIP_CERTIFICATE, BUSINESS_LICENSE, ID_CARD
+    
+    @CreationTimestamp
+    private LocalDateTime createdAt;
+    
+    // Getters and Setters
+}
+```
+
+### 3.4 Booking Service
+
+#### Structure:
+```
+booking-service/
+├── src/main/java/com/roombook/booking/
+│   ├── BookingServiceApplication.java
+│   ├── controller/
+│   │   └── BookingController.java
+│   ├── service/
+│   │   ├── BookingService.java
+│   │   └── BookingServiceImpl.java
+│   ├── repository/
+│   │   ├── BookingRepository.java
+│   │   └── BookingHistoryRepository.java
+│   ├── entity/
+│   │   ├── Booking.java
+│   │   └── BookingHistory.java
+│   ├── dto/
+│   │   ├── BookingDTO.java
+│   │   ├── BookingCreateRequestDTO.java
+│   │   └── BookingStatusUpdateDTO.java
+│   └── config/
+│       └── DatabaseConfig.java
+├── src/main/resources/
+│   └── application.properties
+└── build.gradle
+```
+
+#### application.properties:
+```properties
+server.port=8083
+spring.application.name=booking-service
+
+# Database Configuration
+spring.datasource.url=jdbc:mysql://localhost:3306/booking_service_db
+spring.datasource.username=root
+spring.datasource.password=password
+spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver
+
+# JPA Configuration
+spring.jpa.hibernate.ddl-auto=update
+spring.jpa.show-sql=true
+spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.MySQL8Dialect
+
+# External Service URLs
+user.service.url=http://localhost:8081
+room.service.url=http://localhost:8082
+payment.service.url=http://localhost:8084
+notification.service.url=http://localhost:8085
+```
+
+#### Entity Classes:
+```java
+// Booking.java
+@Entity
+@Table(name = "bookings")
+public class Booking {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+    
+    @Column(nullable = false)
+    private Long roomId;
+    
+    @Column(nullable = false)
+    private Long tenantId;
+    
+    @Column(nullable = false)
+    private Long landlordId;
+    
+    @Column(nullable = false)
+    private Date checkInDate;
+    
+    @Column(nullable = false)
+    private Date checkOutDate;
+    
+    @Column(nullable = false)
+    private Double totalPrice;
+    
+    @Column(nullable = false)
+    private Double depositAmount;
+    
+    @Enumerated(EnumType.STRING)
+    private BookingStatus status; // PENDING, CONFIRMED, CANCELLED, COMPLETED
+    
+    private String notes;
+    
+    @CreationTimestamp
+    private LocalDateTime createdAt;
+    
+    @UpdateTimestamp
+    private LocalDateTime updatedAt;
+    
+    // Getters and Setters
+}
+
+// BookingHistory.java
+@Entity
+@Table(name = "booking_histories")
+public class BookingHistory {
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+    
+    @ManyToOne
+    @JoinColumn(name = "booking_id")
+    private Booking booking;
+    
+    @Enumerated(EnumType.STRING)
+    private BookingStatus previousStatus;
+    
+    @Enumerated(EnumType.STRING)
+    private BookingStatus newStatus;
+    
+    @Column(nullable = false)
+    private Long changedBy;
+    
+    private String reason;
+    
+    @CreationTimestamp
+    private LocalDateTime createdAt;
+    
+    // Getters and Setters
+}
+```
+
+### 3.5 Payment Service
+
+#### Structure:
+```
+payment-service/
+├── src/main/java/com/roombook/payment/
+│   ├── PaymentServiceApplication.java
+│   ├── controller/
+│   │   └── PaymentController.java
+│   ├── service/
+│   │   ├── PaymentService.java
+│   │   └── PaymentServiceImpl.java
+│   ├── repository/
+│   │   ├── PaymentRepository.java
+│   │   └── TransactionRepository.java
+│   ├── entity/
+│   │   ├── Payment.java
+│   │   └── Transaction.java
+│   ├── dto/
+│   │   ├── PaymentDTO.java
+│   │   ├── PaymentCreateRequestDTO.java
+│   │   └── PaymentCallbackDTO.java
+│   └── config/
+│       └── DatabaseConfig.java
+├── src/main/resources/
+│   └── application.properties
+└── build.gradle
+```
+
+#### application.properties:
+```properties
+server.port=8084
+spring.application.name=payment-service
+
+# Database Configuration
+spring.datasource.url=jdbc:mysql://localhost:3306/payment_service_db
+spring.datasource.username=root
+spring.datasource.password=password
+spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver
+
+# JPA Configuration
+spring.jpa.hibernate.ddl-auto=update
+spring.jpa.show-sql=true
+spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.MySQL8Dialect
+
+# Payment Gateway Configuration
+payment.vnpay.merchant.id=your-merchant-id
+payment.vnpay.secret.key=your-secret-key
+payment.vnpay.api.url=https://sandbox.vnpayment.vn/paymentv2/vpcpay.html
+payment.vnpay.return.url=http://localhost:8080/api/payments/callback
+
+# External Service URLs
+booking.service.url=http://localhost:8083
+notification.service.url=http://localhost:8085
+```
+
+### 3.6 Notification Service
+
+#### Structure:
+```
+notification-service/
+├── src/main/java/com/roombook/notification/
+│   ├── NotificationServiceApplication.java
+│   ├── controller/
+│   │   └── NotificationController.java
+│   ├── service/
+│   │   ├── NotificationService.java
+│   │   ├── NotificationServiceImpl.java
+│   │   ├── EmailService.java
+│   │   └── EmailServiceImpl.java
+│   ├── repository/
+│   │   ├── NotificationRepository.java
+│   │   └── NotificationTemplateRepository.java
+│   ├── entity/
+│   │   ├── Notification.java
+│   │   └── NotificationTemplate.java
+│   ├── dto/
+│   │   ├── NotificationDTO.java
+│   │   └── SendNotificationRequestDTO.java
+│   └── config/
+│       └── DatabaseConfig.java
+├── src/main/resources/
+│   └── application.properties
+└── build.gradle
+```
+
+#### application.properties:
+```properties
+server.port=8085
+spring.application.name=notification-service
+
+# Database Configuration
+spring.datasource.url=jdbc:mysql://localhost:3306/notification_service_db
+spring.datasource.username=root
+spring.datasource.password=password
+spring.datasource.driver-class-name=com.mysql.cj.jdbc.Driver
+
+# JPA Configuration
+spring.jpa.hibernate.ddl-auto=update
+spring.jpa.show-sql=true
+spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.MySQL8Dialect
+
+# Email Configuration
+spring.mail.host=smtp.gmail.com
+spring.mail.port=587
+spring.mail.username=your-email@gmail.com
+spring.mail.password=your-app-password
+spring.mail.properties.mail.smtp.auth=true
+spring.mail.properties.mail.smtp.starttls.enable=true
+
+# Firebase Configuration (for Push Notifications)
+firebase.service.account.path=./firebase-service-account.json
+```
+
+## 4. Database Schema
+
+### Databases:
+- **user_service_db**: users, roles, user_profiles
+- **room_service_db**: rooms, room_images, room_documents
+- **booking_service_db**: bookings, booking_histories
+- **payment_service_db**: payments, transactions
+- **notification_service_db**: notifications, notification_templates
+
+## 5. API Endpoints
+
+### User Service:
+- POST `/api/users/register` - Đăng ký tài khoản
+- POST `/api/users/login` - Đăng nhập
+- GET `/api/users/profile` - Lấy thông tin profile
+- PUT `/api/users/profile` - Cập nhật profile
+- GET `/api/users/{id}` - Lấy thông tin user theo ID
+
+### Room Service:
+- POST `/api/rooms` - Tạo phòng mới
+- GET `/api/rooms` - Lấy danh sách phòng
+- GET `/api/rooms/{id}` - Lấy chi tiết phòng
+- PUT `/api/rooms/{id}` - Cập nhật phòng
+- DELETE `/api/rooms/{id}` - Xóa phòng
+- POST `/api/rooms/{id}/images` - Upload ảnh phòng
+- PUT `/api/rooms/{id}/status` - Cập nhật trạng thái phòng (admin)
+
+### Booking Service:
+- POST `/api/bookings` - Tạo booking mới
+- GET `/api/bookings` - Lấy danh sách booking
+- GET `/api/bookings/{id}` - Lấy chi tiết booking
+- PUT `/api/bookings/{id}/status` - Cập nhật trạng thái booking
+- DELETE `/api/bookings/{id}` - Hủy booking
+
+### Payment Service:
+- POST `/api/payments` - Tạo payment mới
+- GET `/api/payments/{id}` - Lấy chi tiết payment
+- POST `/api/payments/callback` - Xử lý callback từ payment gateway
+
+### Notification Service:
+- POST `/api/notifications/send` - Gửi notification
+- GET `/api/notifications` - Lấy danh sách notification
+- PUT `/api/notifications/{id}/read` - Đánh dấu đã đọc
+
+## 6. Quy trình hoạt động
+
+### 6.1 Đăng ký/Đăng nhập:
+1. User đăng ký tài khoản → User Service
+2. Xác thực email → Notification Service
+3. Đăng nhập và nhận JWT token
+
+### 6.2 Đăng phòng:
+1. Chủ trọ tạo phòng → Room Service
+2. Upload ảnh và giấy tờ → Room Service
+3. Phòng ở trạng thái PENDING
+4. Admin duyệt phòng → Room Service
+5. Gửi thông báo cho chủ trọ → Notification Service
+
+### 6.3 Booking phòng:
+1. Người thuê tạo booking → Booking Service
+2. Tạo payment → Payment Service
+3. Thanh toán qua VNPay
+4. Callback xác nhận thanh toán → Payment Service
+5. Cập nhật trạng thái booking → Booking Service
+6. Gửi thông báo cho chủ trọ → Notification Service
+
+## 7. Cài đặt và triển khai
+
+### 7.1 Cài đặt Database:
+```sql
+-- Tạo databases
+CREATE DATABASE user_service_db;
+CREATE DATABASE room_service_db;
+CREATE DATABASE booking_service_db;
+CREATE DATABASE payment_service_db;
+CREATE DATABASE notification_service_db;
+```
+
+### 7.2 Chạy Services:
+```bash
+# Chạy từng service theo thứ tự
+cd api-gateway && ./gradlew bootRun
+cd user-service && ./gradlew bootRun
+cd room-service && ./gradlew bootRun
+cd booking-service && ./gradlew bootRun
+cd payment-service && ./gradlew bootRun
+cd notification-service && ./gradlew bootRun
+```
+
+### 7.3 Test APIs:
+- Swagger UI: http://localhost:8080/swagger-ui.html
+- API Gateway: http://localhost:8080
+- Postman Collection để test từng endpoint
+
+## 8. Tính năng nâng cao
+
+### 8.1 Caching:
+- Redis cache cho thông tin user, room thường xem
+- Cache search results
+
+### 8.2 Messaging:
+- RabbitMQ/Kafka cho async communication
+- Event-driven architecture
+
+### 8.3 Monitoring:
+- Spring Boot Actuator
+- ELK Stack (Elasticsearch, Logstash, Kibana)
+- Prometheus + Grafana
+
+### 8.4 Security:
+- JWT authentication
+- Rate limiting
+- Input validation
+- SQL injection prevention
+
+Đây là kế hoạch chi tiết cho hệ thống booking phòng trọ với kiến trúc microservice. Mỗi service được thiết kế độc lập, có database riêng và follow pattern MVC. Hệ thống hỗ trợ đầy đủ các tính năng như upload ảnh, notification system, và payment integration.
